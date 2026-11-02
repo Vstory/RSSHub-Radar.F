@@ -1,0 +1,252 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# CI 构建发布：dev 有代码变更即出包，每次构建发成一个独立 tag 的发布页。
+#   母版：知识库 100_System/templates/build-ci-release.workflow.yml
+#   机制对齐 Kelivo.F 的 build-ci-release.yml：
+#     ① 同 ref 新推送取消在跑的旧 run（concurrency）
+#     ② 被取消 run 留下的发布页由下一个 run 在开头清扫（Sweep）
+#     ③ 发布排最后，同 tag 重跑走 edit + clobber
+#   本项目（WXT 浏览器扩展）对母版的三处改写：
+#     ② 构建产出三份 zip（Chrome / Firefox / Safari），Safari 必须 macOS runner；
+#        产物名沿用 package.json 脚本产出的名字，不在这里改
+#     ③ 产物门禁用 zip 内的 manifest.json（名字 / 版本 / MV3）与 Safari 包目录名，
+#        扩展名改写漏改是静默失败：包装得上，只是显示成上游那个扩展
+#     ④ 扩展名改写（RSSHub Radar → RSSHub Radar Dev）只在 runner 工作区打补丁，不落库
+# ══════════════════════════════════════════════════════════════════════════════
+name: Build · CI · Release · RSSHub Radar
+
+run-name: "Build · CI · Release · RSSHub Radar · ${{ github.ref_name }}"
+
+on:
+  push:
+    # ⚠️ 必须显式写 branches：只写 paths-ignore 时标签推送也会触发
+    branches: [dev]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+  workflow_dispatch:
+
+# 同一分支只留最新一次构建：新提交 push 上来就取消还在跑的旧 run。
+# 被取消的 run 会跳过后续所有步骤（`if: always()` 也救不回来），它若已经建好发布页
+# 却没能传完资产，残页由下一个 run 的 Sweep 步骤清理。
+concurrency:
+  group: build-ci-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  UPSTREAM_REPO: DIYgod/RSSHub-Radar
+  UPSTREAM_BRANCH: dev
+  # 扩展名：显示名要跟官方商店版区分开（扩展列表里一眼能认）
+  EXT_NAME: RSSHub Radar
+  EXT_NAME_DEV: RSSHub Radar Dev
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # 取消会跳过后续所有 step，被 concurrency 干掉的那个 run 停在「页面已建、资产没传完」
+      # 时自己收不了尾 ⇒ 残页只能由后续 run 顺手清。
+      # 判据同 Kelivo.F：target_commitish 命中一个「只跑过 cancelled、从未 success」的 head sha
+      # （同一提交重跑成功过的留着）。本仓库存量 9 个老页的 target_commitish 是分支名 `dev`
+      # 而不是 sha，它们不会被这条判据命中 —— 正好，老页全是 success 的成品。
+      # ⚠️ tag 还要再匹配本工作流的 tag 命名：只按 prerelease 之类宽松条件筛，
+      #    会误删仓库里其它用途的页（图床页、手发页）。
+      - name: Sweep release pages of cancelled runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          rows=$(gh run list --workflow build-ci-release.yml --limit 100 \
+                   --json headSha,conclusion \
+                   --jq '.[] | "\(.headSha) \(.conclusion)"' || true)
+          dead=$(printf '%s\n' "$rows" | awk '
+                   $2 == "success"   { ok[$1] = 1 }
+                   $2 == "cancelled" { seen[$1] = 1 }
+                   END { for (s in seen) if (!(s in ok)) print s }')
+          if [ -z "${dead//[[:space:]]/}" ]; then
+            echo "没有「只被取消过」的提交，跳过"
+            exit 0
+          fi
+          gh api "repos/${REPO}/releases?per_page=100" \
+            --jq '.[] | "\(.target_commitish)\t\(.tag_name)\t\(.assets|length)"' \
+          | while IFS=$'\t' read -r sha tag assets; do
+              grep -qxF "$sha" <<<"$dead" || continue
+              grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{8}-[0-9]{4}$' <<<"$tag" || continue
+              echo "::notice::清理被取消运行的产物页 ${tag}（资产 ${assets} 个）"
+              gh api -X DELETE "repos/${REPO}/releases/tags/${tag}" || true
+              gh api -X DELETE "repos/${REPO}/git/refs/tags/${tag}" || true
+            done
+
+      # pnpm store 在两个位置都放上：pnpm 9 之后 macOS 默认在 ~/Library/pnpm/store，
+      # 老版本在 ~/.pnpm-store —— 只缓存一处等于白缓存。
+      - name: Cache pnpm store
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/Library/pnpm/store
+            ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - uses: pnpm/action-setup@v6.0.10
+        with:
+          run_install: true
+
+      - name: Use Node.js 22.x
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 22.x
+          cache: "pnpm"
+
+      # 只改工作区，不入库：名字落进仓库会让每次同步上游都撞冲突，
+      # 上游改了写法还会静默失配（包装得上，只是显示成上游那个扩展）。
+      # Safari 的 Xcode 工程名与打包目录名都跟随 manifest.name，所以 package.json
+      # 脚本里 "build/<扩展名>" 那几处必须一起改，否则 safari-convert 之后打不进 zip。
+      - name: Rename extension (workspace only, not committed)
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("fs");
+          const OLD = "RSSHub Radar";
+          const NEW = "RSSHub Radar Dev";
+
+          // manifest.name —— 扩展列表里显示的名字
+          const cfg = fs.readFileSync("wxt.config.ts", "utf8");
+          const patched = cfg.replace(/name:\s*"RSSHub Radar"/, 'name: "' + NEW + '"');
+          if (patched === cfg) throw new Error("wxt.config.ts 中未匹配到 name 字段");
+          fs.writeFileSync("wxt.config.ts", patched);
+
+          // displayName + Safari 打包目录名（Xcode 工程名跟随 manifest.name）
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          pkg.displayName = NEW;
+          for (const [k, v] of Object.entries(pkg.scripts)) {
+            if (typeof v === "string" && v.includes(OLD)) pkg.scripts[k] = v.split(OLD).join(NEW);
+          }
+          fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          NODE
+          grep -n "RSSHub Radar Dev" wxt.config.ts package.json
+
+      # 短号取被构建的那份代码（checkout 后的 HEAD），不是触发提交。
+      - name: Compute build info
+        id: info
+        run: |
+          set -euo pipefail
+          COMMIT="$(git rev-parse HEAD)"
+          VER="$(node -p "require('./package.json').version")"
+          if [ -z "$VER" ]; then
+            echo "::error::读不到 package.json 的 version"
+            exit 1
+          fi
+          STAMP="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)"
+          BUILT_AT="$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M %Z')"
+          {
+            echo "commit=${COMMIT}"
+            echo "short=${COMMIT:0:8}"
+            echo "ver=${VER}"
+            echo "stamp=${STAMP}"
+            echo "built_at=${BUILT_AT}"
+            # 发布页按 tag 排序当历史翻：YYYYMMDD-HHMM 单调递增即可
+            echo "tag=v${VER}-${STAMP}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Package Chrome / Firefox / Safari
+        run: |
+          set -euo pipefail
+          pnpm zip
+          pnpm zip:firefox
+          pnpm build:safari:zip
+          ls -la build
+
+      # 断言产物真的可用。全是静默失败模式：包照样装，只是名字或版本不对。
+      - name: Verify artifacts
+        env:
+          VER: ${{ steps.info.outputs.ver }}
+        run: |
+          set -euo pipefail
+          for f in build/chrome-mv3-prod.zip build/firefox-mv3-prod.zip build/safari-mv3-prod.zip; do
+            [ -f "$f" ] || { echo "::error::缺少产物 $f"; exit 1; }
+          done
+          for f in build/chrome-mv3-prod.zip build/firefox-mv3-prod.zip; do
+            m="$(unzip -p "$f" manifest.json)"
+            name="$(printf '%s' "$m" | jq -r .name)"
+            ver="$(printf '%s' "$m" | jq -r .version)"
+            mv="$(printf '%s' "$m" | jq -r .manifest_version)"
+            [ "$name" = "$EXT_NAME_DEV" ] \
+              || { echo "::error::$f 的扩展名不是 ${EXT_NAME_DEV}：$name"; exit 1; }
+            [ "$ver" = "$VER" ] \
+              || { echo "::error::$f 的版本 ${ver} 与 package.json 的 ${VER} 不符"; exit 1; }
+            [ "$mv" = 3 ] \
+              || { echo "::error::$f 不是 MV3：manifest_version=$mv"; exit 1; }
+            echo "  ✅ $(basename "$f")：${name} v${ver}（MV${mv}）"
+          done
+          # Safari 包是 Xcode 工程目录，工程名跟随 manifest.name
+          unzip -l build/safari-mv3-prod.zip | grep -qF "${EXT_NAME_DEV}/" \
+            || { echo "::error::safari 包里没有 ${EXT_NAME_DEV}/ 目录 —— 扩展名改写漏到 package.json 脚本了？"; exit 1; }
+          echo "  ✅ safari-mv3-prod.zip：含 ${EXT_NAME_DEV}/"
+
+      # artifact 名必须带 run_number：upload-artifact 拒绝同名 artifact，
+      # 「同一 commit、同一分钟内重复触发」会让 stamp 与短号都相同。
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.info.outputs.tag }}-${{ github.run_number }}
+          path: |
+            build/chrome-mv3-prod.zip
+            build/firefox-mv3-prod.zip
+            build/safari-mv3-prod.zip
+          if-no-files-found: error
+
+      # 发布排最后：这样绝大多数取消落在构建阶段，压根没建过页。
+      # target_commitish 写 commit sha（不是分支名）：Sweep 判据靠它认出「这次构建对应哪个提交」。
+      # ⚠️ 不要给 asset 写 label：GitHub 会用 label 顶替文件名显示。
+      - name: Publish to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.info.outputs.tag }}
+          VER: ${{ steps.info.outputs.ver }}
+          COMMIT: ${{ steps.info.outputs.commit }}
+          SHORT: ${{ steps.info.outputs.short }}
+          BUILT_AT: ${{ steps.info.outputs.built_at }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          up="$(gh api "repos/${UPSTREAM_REPO}/commits/${UPSTREAM_BRANCH}" --jq .sha 2>/dev/null || true)"
+          line="**Commit** [\`${SHORT}\`](https://github.com/${REPO}/commit/${COMMIT})　·　**Branch** ${BRANCH}　·　**Version** ${VER}"
+          if [ -n "$up" ]; then
+            line="${line}　·　**Upstream** [\`${up:0:7}\`](https://github.com/${UPSTREAM_REPO}/commit/${up})"
+          fi
+          NOTES="${line}
+          - Chrome / Firefox / Safari 三份 zip；扩展名显示为 ${EXT_NAME_DEV}，可与官方商店版同时安装。
+          - 构建时间：${BUILT_AT}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "tag $TAG 已存在 —— 按重跑处理"
+            gh release edit "$TAG" --title "v${VER} self-build (${BUILT_AT})" --notes "$NOTES"
+          else
+            gh release create "$TAG" --target "$COMMIT" \
+              --title "v${VER} self-build (${BUILT_AT})" --notes "$NOTES"
+          fi
+
+          i=0
+          for f in build/chrome-mv3-prod.zip build/firefox-mv3-prod.zip build/safari-mv3-prod.zip; do
+            [ "$i" -gt 0 ] && sleep 2
+            gh release upload "$TAG" "$f" --clobber
+            i=$((i + 1))
+          done
+          echo "已发布：https://github.com/${REPO}/releases/tag/${TAG}"
+
+          gh api "repos/${REPO}/releases/tags/${TAG}" \
+            --jq '.assets[] | select((.label // "") != "") | (.id | tostring)' \
+          | while read -r id; do
+              [ -n "$id" ] || continue
+              gh api -X PATCH "repos/${REPO}/releases/assets/${id}" -f label="" >/dev/null 2>&1 || true
+            done
