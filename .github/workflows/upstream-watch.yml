@@ -1,0 +1,133 @@
+name: upstream-watch
+
+# 定时检查上游 DIYgod/RSSHub-Radar 的 dev 有没有本 fork 未包含的提交：有就开一张 issue 工单，
+# 上游把 fork 追平后自动关掉。
+#
+# 判据用 rev-list（上游 dev 减去 fork dev）而不是比 sha：fork 的 dev 上有自己的 CI 提交，
+# sha 必然与上游不同，直接比相等会永远误报。
+#
+# schedule 在本仓库不可靠（见 self-build.yml 实测：声明每 30 分钟、实际 2~5.5 小时才跑，还可能整次丢弃），
+# 所以保留 workflow_dispatch 手动触发，并支持 repository_dispatch 供外部调度器用 PAT 直接调 API 触发。
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [upstream-watch]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: DIYgod/RSSHub-Radar
+  UPSTREAM_BRANCH: dev
+  LABEL: upstream-update
+  TZ: Asia/Shanghai
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    name: Watch upstream
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0 # 要共同祖先算 rev-list，浅克隆会算错
+
+      - name: Compare upstream against this fork
+        id: diff
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet "https://github.com/${UPSTREAM_REPO}.git" "${UPSTREAM_BRANCH}"
+          sha=$(git rev-parse FETCH_HEAD)
+          behind=$(git rev-list --count HEAD..FETCH_HEAD)
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "behind=${behind}" >> "$GITHUB_OUTPUT"
+          echo "fork HEAD=$(git rev-parse --short HEAD) / 上游=${sha:0:7} / 落后 ${behind} 个提交"
+
+      - name: Collect upstream commits
+        if: steps.diff.outputs.behind != '0'
+        run: |
+          set -euo pipefail
+          total=${{ steps.diff.outputs.behind }}
+          git log HEAD..FETCH_HEAD -n 30 --date=short \
+            --pretty=format:'- [`%h`](https://github.com/'"${UPSTREAM_REPO}"'/commit/%H) %s（%an，%ad）' > commits.md
+          if [ "$total" -gt 30 ]; then
+            printf '\n- 其余 %d 个提交见上游提交历史\n' "$((total - 30))" >> commits.md
+          fi
+
+      - name: Open or refresh issue
+        if: steps.diff.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.diff.outputs.sha }}
+          BEHIND: ${{ steps.diff.outputs.behind }}
+        run: |
+          set -euo pipefail
+          gh label create "$LABEL" --repo "$GITHUB_REPOSITORY" --force \
+            --color 0e8a16 --description "上游有新提交待同步" >/dev/null
+
+          title="[upstream] ${UPSTREAM_REPO}@${UPSTREAM_BRANCH} 有 ${BEHIND} 个新提交未同步"
+          {
+            echo "上游 [${UPSTREAM_REPO}@${UPSTREAM_BRANCH}](https://github.com/${UPSTREAM_REPO}/tree/${UPSTREAM_BRANCH}) 有本 fork 未包含的提交。"
+            echo
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 上游 HEAD | [\`${SHA:0:7}\`](https://github.com/${UPSTREAM_REPO}/commit/${SHA}) |"
+            echo "| 未包含提交 | ${BEHIND} 个 |"
+            echo "| 检查时间 | $(date '+%Y-%m-%d %H:%M %Z') |"
+            echo
+            echo "### 未同步的提交"
+            echo
+            cat commits.md
+            echo
+            echo "### 同步"
+            echo
+            echo '```bash'
+            echo "python3 100_System/tools/github fetch -C <仓库目录> --remote upstream"
+            echo "git merge upstream/${UPSTREAM_BRANCH}"
+            echo '```'
+            echo
+            echo "<!-- upstream-watch:${SHA} -->"
+          } > body.md
+
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "$LABEL" --state open \
+            --limit 50 --json number,title \
+            --jq 'map(select(.title | startswith("[upstream]"))) | .[0].number // ""')
+
+          if [ -z "$number" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --label "$LABEL" \
+              --title "$title" --body-file body.md
+            exit 0
+          fi
+
+          # 内容没变化就别刷工单，免得每次定时任务都来一条编辑通知
+          old=$(gh issue view "$number" --repo "$GITHUB_REPOSITORY" --json body --jq .body \
+            | grep -oE 'upstream-watch:[0-9a-f]{7,40}' | head -1 | cut -d: -f2 || true)
+          if [ "$old" = "$SHA" ]; then
+            echo "工单 #${number} 已记录上游 ${SHA} → 不刷新"
+          else
+            gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+            echo "已刷新工单 #${number}"
+          fi
+
+      - name: Close issue when in sync
+        if: steps.diff.outputs.behind == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "$LABEL" --state open \
+            --limit 50 --json number,title \
+            --jq 'map(select(.title | startswith("[upstream]"))) | .[0].number // ""')
+          if [ -z "$number" ]; then
+            echo "已与上游一致，无待办工单"
+            exit 0
+          fi
+          gh issue close "$number" --repo "$GITHUB_REPOSITORY" --reason completed \
+            --comment "本 fork 已包含上游 \`${UPSTREAM_BRANCH}\` 的全部提交（\`$(git rev-parse --short FETCH_HEAD)\`）→ 自动关闭。"
