@@ -10,7 +10,8 @@
 #        产物名沿用 package.json 脚本产出的名字，不在这里改
 #     ③ 产物门禁用 zip 内的 manifest.json（名字 / 版本 / MV3）与 Safari 包目录名，
 #        扩展名改写漏改是静默失败：包装得上，只是显示成上游那个扩展
-#     ④ 扩展名改写（RSSHub Radar → RSSHub Radar Dev）只在 runner 工作区打补丁，不落库
+#     ④ 扩展名改写（RSSHub Radar → RSSHub Radar Dev）由 scripts/ci-fork-identity.py 完成，
+#        只在 runner 工作区打补丁、不落库；锚点按「期望命中次数」逐条校验，上游改写法即失败
 # ══════════════════════════════════════════════════════════════════════════════
 name: Build · CI · Release · RSSHub Radar
 
@@ -40,9 +41,11 @@ permissions:
 env:
   UPSTREAM_REPO: DIYgod/RSSHub-Radar
   UPSTREAM_BRANCH: dev
-  # 扩展名：显示名要跟官方商店版区分开（扩展列表里一眼能认）
+  # 扩展名：显示名要跟官方商店版区分开（扩展列表里一眼能认）。
+  # 改写本身在 scripts/ci-fork-identity.py，这里只声明原名与后缀 ——
+  # 门禁的期望值由这两个变量拼出来，避免同一事实写两遍。
   EXT_NAME: RSSHub Radar
-  EXT_NAME_DEV: RSSHub Radar Dev
+  EXT_SUFFIX: Dev
 
 jobs:
   build:
@@ -108,31 +111,10 @@ jobs:
 
       # 只改工作区，不入库：名字落进仓库会让每次同步上游都撞冲突，
       # 上游改了写法还会静默失配（包装得上，只是显示成上游那个扩展）。
-      # Safari 的 Xcode 工程名与打包目录名都跟随 manifest.name，所以 package.json
-      # 脚本里 "build/<扩展名>" 那几处必须一起改，否则 safari-convert 之后打不进 zip。
-      - name: Rename extension (workspace only, not committed)
-        run: |
-          set -euo pipefail
-          node <<'NODE'
-          const fs = require("fs");
-          const OLD = "RSSHub Radar";
-          const NEW = "RSSHub Radar Dev";
-
-          // manifest.name —— 扩展列表里显示的名字
-          const cfg = fs.readFileSync("wxt.config.ts", "utf8");
-          const patched = cfg.replace(/name:\s*"RSSHub Radar"/, 'name: "' + NEW + '"');
-          if (patched === cfg) throw new Error("wxt.config.ts 中未匹配到 name 字段");
-          fs.writeFileSync("wxt.config.ts", patched);
-
-          // displayName + Safari 打包目录名（Xcode 工程名跟随 manifest.name）
-          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
-          pkg.displayName = NEW;
-          for (const [k, v] of Object.entries(pkg.scripts)) {
-            if (typeof v === "string" && v.includes(OLD)) pkg.scripts[k] = v.split(OLD).join(NEW);
-          }
-          fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
-          NODE
-          grep -n "RSSHub Radar Dev" wxt.config.ts package.json
+      # 改写项与断言都在 scripts/ci-fork-identity.py：锚点按「期望命中次数」逐条校验，
+      # 上游改了写法就整体失败，不会静默漏改。
+      - name: Apply fork identity (workspace only, not committed)
+        run: python3 scripts/ci-fork-identity.py --suffix "$EXT_SUFFIX"
 
       # 短号取被构建的那份代码（checkout 后的 HEAD），不是触发提交。
       - name: Compute build info
@@ -171,6 +153,7 @@ jobs:
           VER: ${{ steps.info.outputs.ver }}
         run: |
           set -euo pipefail
+          WANT="${EXT_NAME} ${EXT_SUFFIX}"
           for f in build/chrome-mv3-prod.zip build/firefox-mv3-prod.zip build/safari-mv3-prod.zip; do
             [ -f "$f" ] || { echo "::error::缺少产物 $f"; exit 1; }
           done
@@ -179,8 +162,8 @@ jobs:
             name="$(printf '%s' "$m" | jq -r .name)"
             ver="$(printf '%s' "$m" | jq -r .version)"
             mv="$(printf '%s' "$m" | jq -r .manifest_version)"
-            [ "$name" = "$EXT_NAME_DEV" ] \
-              || { echo "::error::$f 的扩展名不是 ${EXT_NAME_DEV}：$name"; exit 1; }
+            [ "$name" = "$WANT" ] \
+              || { echo "::error::$f 的扩展名不是 ${WANT}：$name"; exit 1; }
             [ "$ver" = "$VER" ] \
               || { echo "::error::$f 的版本 ${ver} 与 package.json 的 ${VER} 不符"; exit 1; }
             [ "$mv" = 3 ] \
@@ -188,9 +171,9 @@ jobs:
             echo "  ✅ $(basename "$f")：${name} v${ver}（MV${mv}）"
           done
           # Safari 包是 Xcode 工程目录，工程名跟随 manifest.name
-          unzip -l build/safari-mv3-prod.zip | grep -qF "${EXT_NAME_DEV}/" \
-            || { echo "::error::safari 包里没有 ${EXT_NAME_DEV}/ 目录 —— 扩展名改写漏到 package.json 脚本了？"; exit 1; }
-          echo "  ✅ safari-mv3-prod.zip：含 ${EXT_NAME_DEV}/"
+          unzip -l build/safari-mv3-prod.zip | grep -qF "${WANT}/" \
+            || { echo "::error::safari 包里没有 ${WANT}/ 目录 —— scripts/ci-fork-identity.py 的 safari 路径改写漏了？"; exit 1; }
+          echo "  ✅ safari-mv3-prod.zip：含 ${WANT}/"
 
       # artifact 名必须带 run_number：upload-artifact 拒绝同名 artifact，
       # 「同一 commit、同一分钟内重复触发」会让 stamp 与短号都相同。
@@ -225,7 +208,7 @@ jobs:
             line="${line}　·　**Upstream** [\`${up:0:7}\`](https://github.com/${UPSTREAM_REPO}/commit/${up})"
           fi
           NOTES="${line}
-          - Chrome / Firefox / Safari 三份 zip；扩展名显示为 ${EXT_NAME_DEV}，可与官方商店版同时安装。
+          - Chrome / Firefox / Safari 三份 zip；扩展名显示为 ${EXT_NAME} ${EXT_SUFFIX}，可与官方商店版同时安装。
           - 构建时间：${BUILT_AT}"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
