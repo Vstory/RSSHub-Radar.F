@@ -80,13 +80,15 @@ jobs:
             echo "没有「只被取消过」的提交，跳过"
             exit 0
           fi
+          # ⚠️ 必须按 release id 删：DELETE /releases/tags/{tag} 实测 404，那条路径删不掉页；
+          #    只删 git ref 会让 release 变成 untagged draft 留在账号里（公开看不见，但没清干净）。
           gh api "repos/${REPO}/releases?per_page=100" \
-            --jq '.[] | "\(.target_commitish)\t\(.tag_name)\t\(.assets|length)"' \
-          | while IFS=$'\t' read -r sha tag assets; do
+            --jq '.[] | "\(.id)\t\(.target_commitish)\t\(.tag_name)\t\(.assets|length)"' \
+          | while IFS=$'\t' read -r id sha tag assets; do
               grep -qxF "$sha" <<<"$dead" || continue
               grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{8}-[0-9]{4}$' <<<"$tag" || continue
-              echo "::notice::清理被取消运行的产物页 ${tag}（资产 ${assets} 个）"
-              gh api -X DELETE "repos/${REPO}/releases/tags/${tag}" || true
+              echo "::notice::清理被取消运行的产物页 ${tag}（id=${id}，资产 ${assets} 个）"
+              gh api -X DELETE "repos/${REPO}/releases/${id}" || true
               gh api -X DELETE "repos/${REPO}/git/refs/tags/${tag}" || true
             done
 
