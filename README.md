@@ -11,13 +11,13 @@
 [![users](https://img.shields.io/chrome-web-store/users/kefjpfngnndepjbopdmoebkipbgkggaa.svg?style=flat-square)](https://chromewebstore.google.com/detail/kefjpfngnndepjbopdmoebkipbgkggaa)
 [![rating](https://img.shields.io/chrome-web-store/rating/kefjpfngnndepjbopdmoebkipbgkggaa.svg?style=flat-square)](https://chromewebstore.google.com/detail/kefjpfngnndepjbopdmoebkipbgkggaa)
 
-[![Mozilla Add-on](https://img.shields.io/amo/v/rsshub-radar?style=flat-square&logo=firefoxbrowser&logoColor=fff)](https://addons.mozilla.org/zh-CN/firefox/addon/rsshub-radar/)
-[![Mozilla Add-on](https://img.shields.io/amo/users/rsshub-radar?color=%2344cc11&style=flat-square)](https://addons.mozilla.org/zh-CN/firefox/addon/rsshub-radar/)
-[![Mozilla Add-on](https://img.shields.io/amo/rating/rsshub-radar?style=flat-square)](https://addons.mozilla.org/zh-CN/firefox/addon/rsshub-radar/)
+[![Mozilla Add-on](https://img.shields.io/amo/v/rsshub-radar?style=flat-square&logo=firefoxbrowser&logoColor=fff)](https://addons.mozilla.org/firefox/addon/rsshub-radar/)
+[![Mozilla Add-on](https://img.shields.io/amo/users/rsshub-radar?color=%2344cc11&style=flat-square)](https://addons.mozilla.org/firefox/addon/rsshub-radar/)
+[![Mozilla Add-on](https://img.shields.io/amo/rating/rsshub-radar?style=flat-square)](https://addons.mozilla.org/firefox/addon/rsshub-radar/)
 
-[![](https://img.shields.io/badge/dynamic/json?label=edge%20add-on&prefix=v&query=%24.version&url=https%3A%2F%2Fmicrosoftedge.microsoft.com%2Faddons%2Fgetproductdetailsbycrxid%2Fgangkeiaobmjcjokiofpkfpcobpbmnln&style=flat-square&logo=microsoftedge&logoColor=fff)](https://microsoftedge.microsoft.com/addons/detail/arxivutils/gangkeiaobmjcjokiofpkfpcobpbmnln)
-[![](https://img.shields.io/badge/dynamic/json?label=users&query=%24.activeInstallCount&url=https%3A%2F%2Fmicrosoftedge.microsoft.com%2Faddons%2Fgetproductdetailsbycrxid%2Fgangkeiaobmjcjokiofpkfpcobpbmnln&style=flat-square&color=%2344cc11)](https://microsoftedge.microsoft.com/addons/detail/arxivutils/gangkeiaobmjcjokiofpkfpcobpbmnln)
-[![](https://img.shields.io/badge/dynamic/json?label=rating&suffix=/5&query=%24.averageRating&url=https%3A%2F%2Fmicrosoftedge.microsoft.com%2Faddons%2Fgetproductdetailsbycrxid%2Fgangkeiaobmjcjokiofpkfpcobpbmnln&style=flat-square&color=%2344cc11)](https://microsoftedge.microsoft.com/addons/detail/arxivutils/gangkeiaobmjcjokiofpkfpcobpbmnln)
+[![](https://img.shields.io/badge/dynamic/json?label=edge%20add-on&prefix=v&query=%24.version&url=https%3A%2F%2Fmicrosoftedge.microsoft.com%2Faddons%2Fgetproductdetailsbycrxid%2Fgangkeiaobmjcjokiofpkfpcobpbmnln&style=flat-square&logo=microsoftedge&logoColor=fff)](https://microsoftedge.microsoft.com/addons/detail/rsshub-radar/gangkeiaobmjcjokiofpkfpcobpbmnln)
+[![](https://img.shields.io/badge/dynamic/json?label=users&query=%24.activeInstallCount&url=https%3A%2F%2Fmicrosoftedge.microsoft.com%2Faddons%2Fgetproductdetailsbycrxid%2Fgangkeiaobmjcjokiofpkfpcobpbmnln&style=flat-square&color=%2344cc11)](https://microsoftedge.microsoft.com/addons/detail/rsshub-radar/gangkeiaobmjcjokiofpkfpcobpbmnln)
+[![](https://img.shields.io/badge/dynamic/json?label=rating&suffix=/5&query=%24.averageRating&url=https%3A%2F%2Fmicrosoftedge.microsoft.com%2Faddons%2Fgetproductdetailsbycrxid%2Fgangkeiaobmjcjokiofpkfpcobpbmnln&style=flat-square&color=%2344cc11)](https://microsoftedge.microsoft.com/addons/detail/rsshub-radar/gangkeiaobmjcjokiofpkfpcobpbmnln)
 
 [![iTunes App Store](https://img.shields.io/itunes/v/1610744717?label=apple%20app%20store&style=flat-square&logo=appstore&logoColor=fff)](https://apps.apple.com/us/app/rsshub-radar/id1610744717)
 
@@ -79,6 +79,44 @@ Select the `manifest.json` file in the unzipped extension directory
 
 ## Join us
 
+### Reproduce the Firefox release build (Mozilla reviewers)
+
+Build environment: macOS on Apple Silicon, Node.js **24.22.1**, and pnpm
+**12.16.1**. Install Node.js from https://nodejs.org/en/download and install the
+exact pnpm version with `npm install --global pnpm@12.16.1`.
+
+Extract the source ZIP for the submitted version into an empty directory, then
+run these commands from its root:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm zip:firefox
+```
+
+The unpacked extension is written to `.output/firefox-mv3/`. The uploadable
+extension is `.output/rsshub-radar-2.3.1-firefox.zip` (also copied to
+`build/firefox-mv3-prod.zip`), and its matching source package is
+`.output/rsshub-radar-2.3.1-sources.zip`. Compare the extracted extension files
+with the submitted unsigned ZIP. No credentials, `.env` file, private packages,
+or downloaded RSSHub rules are needed to build. Use the included lockfile;
+installing with npm or updating dependencies can change the generated code.
+
+Firefox builds exclude browsing and interaction analytics even when
+`WXT_UMAMI_ID`, `WXT_UMAMI_URL`, or `WXT_UMAMI_SAMPLE_RATE` are set in the build
+environment. Feed lists use a bundled icon instead of loading site favicons or
+sending visited domains to a favicon service. Feed and route detection runs
+locally. The extension downloads rule data from the configured RSSHub instance;
+that request does not contain the current page URL. Opening or previewing a feed
+contacts its URL, and a subscription button sends the selected feed link to the
+reader chosen by the user. Those actions occur only when the user invokes them.
+
+To test without an account, load `.output/firefox-mv3/manifest.json` via
+`about:debugging` → **This Firefox** → **Load Temporary Add-on**. Open a page
+with an RSS/Atom link, then open RSSHub Radar to inspect and copy its feed link.
+Also check direct RSS URLs, feed previews, and the General, Rules, and About
+options pages. Browsing, opening the popup, copying links, and visiting options
+must not send analytics requests.
+
 ### Start the Development Server
 
 Also refer to: https://wxt.dev/guide/installation
@@ -99,7 +137,7 @@ Get the `.output/chrome-mv3` directory, the installation method refers to [manua
 
 ### Submit New RSSHub Radar Rules
 
-[See documentation](https://docs.rsshub.app/joinus/new-radar)
+[See documentation](https://docs.rsshub.app/joinus/new-rss/submit-route) ([GitHub source](https://github.com/RSSNext/rsshub-docs/blob/main/src/joinus/new-rss/submit-route.md))
 
 ## Author
 

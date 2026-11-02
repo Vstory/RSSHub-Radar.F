@@ -7,6 +7,21 @@ on:
         required: false
         default: false
         type: boolean
+      chrome:
+        description: "Submit to Chrome Web Store"
+        required: false
+        default: true
+        type: boolean
+      firefox:
+        description: "Submit to Firefox Add-ons (AMO)"
+        required: false
+        default: true
+        type: boolean
+      edge:
+        description: "Submit to Microsoft Edge Add-ons"
+        required: false
+        default: true
+        type: boolean
 
 env:
   WXT_UMAMI_ID: ${{ vars.WXT_UMAMI_ID || vars.PLASMO_PUBLIC_UMAMI_ID }}
@@ -18,34 +33,58 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Cache pnpm modules
-        uses: actions/cache@v6
+      - uses: pnpm/action-setup@v6
         with:
-          path: ~/.pnpm-store
-          key: ${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-
-      - uses: pnpm/action-setup@v6.0.10
+          version: 12.16.1
+          run_install: false
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v7
         with:
-          run_install: true
-      - name: Use Node.js 22.x
-        uses: actions/setup-node@v7.0.0
-        with:
-          node-version: 22.x
+          node-version: 24.x
           cache: "pnpm"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
       - name: Package the extension for Chrome
         run: pnpm zip
       - name: Package the extension for Firefox
         run: pnpm zip:firefox
-      - name: Submit to web stores
+      - name: Check Chrome Web Store credentials
+        if: ${{ inputs.chrome && inputs.dry_run }}
+        uses: wdzeng/chrome-extension@v2.0.0
+        with:
+          action: check-credentials
+          client-id: ${{ vars.CHROME_CLIENT_ID }}
+          client-secret: ${{ secrets.CHROME_CLIENT_SECRET }}
+          refresh-token: ${{ secrets.CHROME_REFRESH_TOKEN }}
+      - name: Submit to Chrome Web Store
+        if: ${{ inputs.chrome && !inputs.dry_run }}
+        uses: wdzeng/chrome-extension@v2.0.0
+        with:
+          extension-id: ${{ vars.CHROME_EXTENSION_ID }}
+          zip-path: .output/*-chrome.zip
+          publisher-id: ${{ vars.CHROME_PUBLISHER_ID }}
+          client-id: ${{ vars.CHROME_CLIENT_ID }}
+          client-secret: ${{ secrets.CHROME_CLIENT_SECRET }}
+          refresh-token: ${{ secrets.CHROME_REFRESH_TOKEN }}
+      - name: Submit to Firefox Add-ons
+        if: ${{ inputs.firefox }}
         env:
-          CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID || vars.CHROME_EXTENSION_ID }}
-          CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID || vars.CHROME_CLIENT_ID }}
-          CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET || vars.CHROME_CLIENT_SECRET }}
-          CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN || vars.CHROME_REFRESH_TOKEN }}
           FIREFOX_EXTENSION_ID: ${{ secrets.FIREFOX_EXTENSION_ID || vars.FIREFOX_EXTENSION_ID }}
           FIREFOX_JWT_ISSUER: ${{ secrets.FIREFOX_JWT_ISSUER || vars.FIREFOX_JWT_ISSUER }}
           FIREFOX_JWT_SECRET: ${{ secrets.FIREFOX_JWT_SECRET || vars.FIREFOX_JWT_SECRET }}
+        run: |
+          DRY_RUN_FLAG=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+
+          pnpm wxt submit \
+            --firefox-zip .output/*-firefox.zip \
+            --firefox-sources-zip .output/*-sources.zip \
+            ${DRY_RUN_FLAG}
+      - name: Submit to Microsoft Edge Add-ons
+        if: ${{ inputs.edge }}
+        env:
           EDGE_PRODUCT_ID: ${{ secrets.EDGE_PRODUCT_ID || vars.EDGE_PRODUCT_ID }}
           EDGE_CLIENT_ID: ${{ secrets.EDGE_CLIENT_ID || vars.EDGE_CLIENT_ID }}
           EDGE_API_KEY: ${{ secrets.EDGE_API_KEY || vars.EDGE_API_KEY }}
@@ -56,8 +95,5 @@ jobs:
           fi
 
           pnpm wxt submit \
-            --chrome-zip .output/*-chrome.zip \
-            --firefox-zip .output/*-firefox.zip \
-            --firefox-sources-zip .output/*-sources.zip \
             --edge-zip .output/*-chrome.zip \
             ${DRY_RUN_FLAG}

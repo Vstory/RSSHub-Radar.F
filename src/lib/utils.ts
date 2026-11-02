@@ -1,5 +1,5 @@
 import { clsx, type ClassValue } from "clsx"
-import he from "he"
+import { decode } from "he"
 import { twMerge } from "tailwind-merge"
 
 export function cn(...inputs: ClassValue[]) {
@@ -17,12 +17,13 @@ export function removeFunctionFields(obj) {
 }
 export function parseRSS(content: string) {
   content = content.replaceAll("&lt;", "<").replaceAll("&gt;", ">")
-  if (content.includes("<rss ") || content.includes("<feed ")) {
-    const titleContent = content.match(/<title>(.*)<\/title>/)?.[1]
+  if (/<rss(?:\s|>)/i.test(content) || /<feed(?:\s|>)/i.test(content)) {
+    const titleContent = content.match(
+      /<title(?:\s[^>]*)?>([\s\S]*?)<\/title>/i,
+    )?.[1]
     const title = titleContent
-      ? he
-          .decode(titleContent)
-          ?.replace(/<!\[CDATA\[(.*)]]>/, (match, p1) => p1)
+      ? decode(titleContent)
+          ?.replace(/<!\[CDATA\[([\s\S]*?)]]>/g, (match, p1) => p1)
           ?.trim()
       : ""
     return {
