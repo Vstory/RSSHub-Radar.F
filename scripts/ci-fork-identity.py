@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SCRIPT_VERSION=1.0.0
 """CI 专用：把 runner 工作区的扩展显示名改写成 fork 形态（RSSHub Radar → RSSHub Radar Dev）。
+改两处：wxt.config.ts 的 manifest.name（扩展列表里显示的名字）、package.json 的 displayName。
 
 为什么落不进仓库：显示名一旦提交，每次同步上游都撞冲突；上游改了写法还会静默失配 ——
 产物照样能装，只是浏览器扩展列表里显示成上游那个扩展。
@@ -38,11 +39,9 @@ def build_edits(suffix: str) -> list[tuple[str, str, str, int]]:
         ("wxt.config.ts", f'name: "{UPSTREAM_NAME}",', f'name: "{new}",', 1),
         # 打包元数据里的 displayName
         ("package.json", f'"displayName": "{UPSTREAM_NAME}",', f'"displayName": "{new}",', 1),
-        # Safari 的 Xcode 工程名与打包目录名都跟随 manifest.name：
-        #   safari-convert 用 "build/<名称>/macOS (App)/Info.plist"，
-        #   safari-zip 打的是 "build/<名称>" —— 这两处不改，safari-convert 之后
-        #   plutil 找不到 Info.plist、zip 也打不进包（构建直接失败，不是静默失败）
-        ("package.json", f"build/{UPSTREAM_NAME}", f"build/{new}", 2),
+        # 注：package.json 的 safari-convert / safari-zip 里还有两处 "build/<名称>"，
+        #    CI 不出 Safari 包（xcrun 只有 macOS 有），所以这里不碰；哪天恢复 Safari
+        #    出包，必须连那两处一起改（Xcode 工程名与打包目录名都跟随 manifest.name）。
     ]
 
 
@@ -127,11 +126,11 @@ def selftest() -> int:
             loaded = json.loads(patched)
             if loaded["displayName"] != "RSSHub Radar Dev":
                 fails.append("displayName 没改成 RSSHub Radar Dev")
-            for k in ("safari-convert", "safari-zip"):
-                if "build/RSSHub Radar Dev" not in loaded["scripts"][k]:
-                    fails.append(f"{k} 里的 Safari 打包路径没跟着改")
             if loaded["version"] != "2.3.1":
                 fails.append("改写动到了不该动的字段")
+            # 不出 Safari 包，就不该去动 package.json 里的 Safari 脚本路径
+            if "build/RSSHub Radar Dev" in patched:
+                fails.append("不该改写 Safari 打包路径（CI 不出 Safari 包）")
             if 'name: "RSSHub Radar Dev"' not in (REPO_ROOT / "wxt.config.ts").read_text(encoding="utf-8"):
                 fails.append("wxt.config.ts 的 manifest.name 没改")
 
@@ -140,14 +139,12 @@ def selftest() -> int:
             if not apply(edits):
                 fails.append("锚点缺失时没有失败")
 
-            # 次数不符也必须失败（safari 两处少了一处）
-            (REPO_ROOT / "wxt.config.ts").write_text(cfg, encoding="utf-8")
-            pkg["scripts"].pop("safari-zip")
-            (REPO_ROOT / "package.json").write_text(
-                json.dumps(pkg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            # 已改过一次的树再跑一遍也必须失败（防重复追加后缀）
+            (REPO_ROOT / "wxt.config.ts").write_text(
+                cfg.replace('name: "RSSHub Radar",', 'name: "RSSHub Radar Dev",'), encoding="utf-8"
             )
             if not apply(edits):
-                fails.append("safari 路径只剩一处时没有失败")
+                fails.append("锚点已被改写时没有失败")
         finally:
             REPO_ROOT = orig_root
 

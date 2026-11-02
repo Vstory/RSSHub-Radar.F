@@ -6,12 +6,15 @@
 #     ② 被取消 run 留下的发布页由下一个 run 在开头清扫（Sweep）
 #     ③ 发布排最后，同 tag 重跑走 edit + clobber
 #   本项目（WXT 浏览器扩展）对母版的三处改写：
-#     ② 构建产出三份 zip（Chrome / Firefox / Safari），Safari 必须 macOS runner；
-#        产物名沿用 package.json 脚本产出的名字，不在这里改
-#     ③ 产物门禁用 zip 内的 manifest.json（名字 / 版本 / MV3）与 Safari 包目录名，
-#        扩展名改写漏改是静默失败：包装得上，只是显示成上游那个扩展
+#     ② 产物是 Chrome / Firefox 两份 zip；Safari 那份要 xcrun safari-web-extension-converter
+#        （Xcode 自带，Linux 无替代），不出 —— 因此整套跑在 ubuntu-latest 上，不必等 macOS runner
+#     ③ 产物门禁解 zip 读 manifest.json（名字 / 版本 / MV3）：扩展名改写漏改是静默失败，
+#        包装得上，只是显示成上游那个扩展
 #     ④ 扩展名改写（RSSHub Radar → RSSHub Radar Dev）由 scripts/ci-fork-identity.py 完成，
 #        只在 runner 工作区打补丁、不落库；锚点按「期望命中次数」逐条校验，上游改写法即失败
+#   环境策略：runner 用 ubuntu-26.04（母版指定的当前 LTS，不用 -latest 免得随镜像漂）、
+#             Node 取最新 LTS、pnpm 由 package.json 的 packageManager 钉死；
+#             action 一律钉完整 commit SHA（仓库开了 sha_pinning_required），SHA 对应的版本见行内注释
 # ══════════════════════════════════════════════════════════════════════════════
 name: Build · CI · Release · RSSHub Radar
 
@@ -49,9 +52,9 @@ env:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # 取消会跳过后续所有 step，被 concurrency 干掉的那个 run 停在「页面已建、资产没传完」
       # 时自己收不了尾 ⇒ 残页只能由后续 run 顺手清。
@@ -87,26 +90,25 @@ jobs:
               gh api -X DELETE "repos/${REPO}/git/refs/tags/${tag}" || true
             done
 
-      # pnpm store 在两个位置都放上：pnpm 9 之后 macOS 默认在 ~/Library/pnpm/store，
-      # 老版本在 ~/.pnpm-store —— 只缓存一处等于白缓存。
       - name: Cache pnpm store
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/Library/pnpm/store
+            ~/.local/share/pnpm/store
             ~/.pnpm-store
           key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-
 
-      - uses: pnpm/action-setup@v6.0.10
+      # 版本由 package.json 的 packageManager 字段钉死（pnpm@12.16.1+sha512...），这里不另写版本
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           run_install: true
 
-      - name: Use Node.js 22.x
-        uses: actions/setup-node@v7.0.0
+      - name: Use latest Node LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22.x
+          node-version: lts/*
           cache: "pnpm"
 
       # 只改工作区，不入库：名字落进仓库会让每次同步上游都撞冲突，
@@ -139,12 +141,11 @@ jobs:
             echo "tag=v${VER}-${STAMP}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Package Chrome / Firefox / Safari
+      - name: Package Chrome / Firefox
         run: |
           set -euo pipefail
           pnpm zip
           pnpm zip:firefox
-          pnpm build:safari:zip
           ls -la build
 
       # 断言产物真的可用。全是静默失败模式：包照样装，只是名字或版本不对。
@@ -154,10 +155,8 @@ jobs:
         run: |
           set -euo pipefail
           WANT="${EXT_NAME} ${EXT_SUFFIX}"
-          for f in build/chrome-mv3-prod.zip build/firefox-mv3-prod.zip build/safari-mv3-prod.zip; do
-            [ -f "$f" ] || { echo "::error::缺少产物 $f"; exit 1; }
-          done
           for f in build/chrome-mv3-prod.zip build/firefox-mv3-prod.zip; do
+            [ -f "$f" ] || { echo "::error::缺少产物 $f"; exit 1; }
             m="$(unzip -p "$f" manifest.json)"
             name="$(printf '%s' "$m" | jq -r .name)"
             ver="$(printf '%s' "$m" | jq -r .version)"
@@ -170,21 +169,16 @@ jobs:
               || { echo "::error::$f 不是 MV3：manifest_version=$mv"; exit 1; }
             echo "  ✅ $(basename "$f")：${name} v${ver}（MV${mv}）"
           done
-          # Safari 包是 Xcode 工程目录，工程名跟随 manifest.name
-          unzip -l build/safari-mv3-prod.zip | grep -qF "${WANT}/" \
-            || { echo "::error::safari 包里没有 ${WANT}/ 目录 —— scripts/ci-fork-identity.py 的 safari 路径改写漏了？"; exit 1; }
-          echo "  ✅ safari-mv3-prod.zip：含 ${WANT}/"
 
       # artifact 名必须带 run_number：upload-artifact 拒绝同名 artifact，
       # 「同一 commit、同一分钟内重复触发」会让 stamp 与短号都相同。
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.info.outputs.tag }}-${{ github.run_number }}
           path: |
             build/chrome-mv3-prod.zip
             build/firefox-mv3-prod.zip
-            build/safari-mv3-prod.zip
           if-no-files-found: error
 
       # 发布排最后：这样绝大多数取消落在构建阶段，压根没建过页。
@@ -208,7 +202,7 @@ jobs:
             line="${line}　·　**Upstream** [\`${up:0:7}\`](https://github.com/${UPSTREAM_REPO}/commit/${up})"
           fi
           NOTES="${line}
-          - Chrome / Firefox / Safari 三份 zip；扩展名显示为 ${EXT_NAME} ${EXT_SUFFIX}，可与官方商店版同时安装。
+          - Chrome / Firefox 两份 zip（MV3）；扩展名显示为 ${EXT_NAME} ${EXT_SUFFIX}，可与官方商店版同时安装。
           - 构建时间：${BUILT_AT}"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -220,7 +214,7 @@ jobs:
           fi
 
           i=0
-          for f in build/chrome-mv3-prod.zip build/firefox-mv3-prod.zip build/safari-mv3-prod.zip; do
+          for f in build/chrome-mv3-prod.zip build/firefox-mv3-prod.zip; do
             [ "$i" -gt 0 ] && sleep 2
             gh release upload "$TAG" "$f" --clobber
             i=$((i + 1))
